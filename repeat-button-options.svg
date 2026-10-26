@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="300" viewBox="0 0 840 300">
+ <rect width="840" height="300" fill="#15191b"/>
+ <text x="30" y="42" fill="#89eb9d" font-family="Segoe UI,Arial,sans-serif" font-size="25" font-weight="700">MyAmp · Repeat button</text>
+ <text x="30" y="68" fill="#aeb8b4" font-family="Segoe UI,Arial,sans-serif" font-size="15">Square loop arrows · dots centered inside indicate the repeat mode</text>
+ <g transform="translate(0 0)" fill="none" stroke="#89eb9d" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+  <g transform="translate(205 91)">
+   <rect width="110" height="110" rx="16" fill="#18201d" stroke="#315640" stroke-width="1.5"/>
+   <path d="M25 28 H68 Q81 28 81 41 V45 M74 39 L81 46 L88 39 M85 82 H42 Q29 82 29 69 V65 M22 71 L29 64 L36 71"/>
+   <circle cx="49" cy="55" r="3" fill="#89eb9d" stroke="none"/><circle cx="61" cy="55" r="3" fill="#89eb9d" stroke="none"/>
+   <text x="55" y="137" text-anchor="middle" fill="#aeb8b4" stroke="none" font-family="Segoe UI,Arial,sans-serif" font-size="14">Playlist · 2 dots · startup</text>
+  </g>
+  <g transform="translate(365 91)">
+   <rect width="110" height="110" rx="16" fill="#18201d" stroke="#315640" stroke-width="1.5"/>
+   <path d="M25 28 H68 Q81 28 81 41 V45 M74 39 L81 46 L88 39 M85 82 H42 Q29 82 29 69 V65 M22 71 L29 64 L36 71"/>
+   <circle cx="55" cy="55" r="3" fill="#89eb9d" stroke="none"/>
+   <text x="55" y="137" text-anchor="middle" fill="#aeb8b4" stroke="none" font-family="Segoe UI,Arial,sans-serif" font-size="14">Song · 1 dot</text>
+  </g>
+  <g transform="translate(525 91)">
+   <rect width="110" height="110" rx="16" fill="#18201d" stroke="#315640" stroke-width="1.5"/>
+   <path d="M25 28 H68 Q81 28 81 41 V45 M74 39 L81 46 L88 39 M85 82 H42 Q29 82 29 69 V65 M22 71 L29 64 L36 71"/>
+   <text x="55" y="137" text-anchor="middle" fill="#aeb8b4" stroke="none" font-family="Segoe UI,Arial,sans-serif" font-size="14">Off · 0 dots</text>
+  </g>
+ </g>
+ <text x="30" y="274" fill="#6f7d77" font-family="Segoe UI,Arial,sans-serif" font-size="13">One button cycles Playlist → Song → Off → Playlist.</text>
+</svg>
