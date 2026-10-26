@@ -1,6 +1,7 @@
 # MyAmp
 
 A vibecoded compact, portable Windows music player with separate player and playlist windows.
+Focused on minimal system resources during usage.
 
 ## Playback
 
