@@ -17,7 +17,7 @@ Focused on minimal system resources during usage.
 - Closing the player exits and stops playback. Closing the playlist hides it; minimizing the player hides the playlist and restores its prior visibility when the player is restored. Minimizing either window does not stop playback.
 - When both windows overlap, the player stays above the playlist, while other applications can still cover the player.
 - The playlist is not saved between launches.
-- Right-click the player and choose a scale from 50% to 200%; the player and playlist contents scale together.
+- Right-click the player to choose a scale from 50% to 200% (the player and playlist scale together) or toggle whether duplicate tracks are allowed. Duplicate tracks are disabled by default at each launch.
 
 The player uses the Windows API for its interface and bundles its decoders. It does not require .NET, an installer, or separately installed audio codecs.
 

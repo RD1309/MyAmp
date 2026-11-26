@@ -24,18 +24,18 @@
 #include "../vendor/miniaudio.h"
 
 #define APP_NAME L"MyAmp"
-#define APP_VERSION L"1.0.11"
+#define APP_VERSION L"1.0.12"
 #define APP_TITLE L"MyAmp " APP_VERSION
 #define APP_ICON_ID 101
 #define MYAMP_COPYDATA_TAG 0x4D59414Du
-#define MYAMP_INSTANCE_MUTEX L"Local\\MyAmp_1_0_11_Instance"
+#define MYAMP_INSTANCE_MUTEX L"Local\\MyAmp_1_0_12_Instance"
 #define MAX_TRACKS 100000
 #define PLAYER_TIMER 1
 #define PLAYER_TIMER_MS 200
 #define PLAYLIST_SCROLL_WIDTH 16
 #define PLAYLIST_ROW_HEIGHT 30
 
-enum { IDM_SCALE_50 = 4101, IDM_SCALE_75, IDM_SCALE_100, IDM_SCALE_125, IDM_SCALE_150, IDM_SCALE_200 };
+enum { IDM_SCALE_50 = 4101, IDM_SCALE_75, IDM_SCALE_100, IDM_SCALE_125, IDM_SCALE_150, IDM_SCALE_200, IDM_ALLOW_DUPLICATES };
 enum { IDM_PLAYLIST_REMOVE = 4201, IDM_PLAYLIST_LOCATION };
 
 typedef struct Track {
@@ -87,6 +87,7 @@ static RepeatMode g_repeatMode = REPEAT_PLAYLIST;
 static int g_uiScalePercent = 100;
 static float g_volume = 0.78f;
 static BOOL g_muted;
+static BOOL g_allowDuplicates;
 static Track *g_tracks;
 static int g_trackCount;
 static int g_trackCapacity;
@@ -412,6 +413,30 @@ static int track_cmp(const void *a, const void *b) {
     return _wcsicmp(x->path, y->path);
 }
 
+static int path_pointer_cmp(const void *a, const void *b) {
+    const wchar_t *x = *(const wchar_t *const *)a;
+    const wchar_t *y = *(const wchar_t *const *)b;
+    return _wcsicmp(x, y);
+}
+
+static BOOL path_is_queued(const wchar_t *path, const wchar_t **sortedPaths, int pathCount) {
+    int low = 0, high = pathCount;
+    if (sortedPaths != NULL) {
+        while (low < high) {
+            int middle = low + (high - low) / 2;
+            int cmp = _wcsicmp(path, sortedPaths[middle]);
+            if (cmp == 0) return TRUE;
+            if (cmp < 0) high = middle;
+            else low = middle + 1;
+        }
+        return FALSE;
+    }
+    for (low = 0; low < pathCount; low++) {
+        if (_wcsicmp(path, g_tracks[low].path) == 0) return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOL grow_tracks(Track **items, int *capacity, int need) {
     int n = *capacity ? *capacity : 32;
     Track *p;
@@ -437,7 +462,8 @@ static BOOL grow_history(int need) {
     return TRUE;
 }
 
-static void scan_path(const wchar_t *path, Track **batch, int *count, int *capacity, int depth) {
+static void scan_path(const wchar_t *path, Track **batch, int *count, int *capacity, int depth,
+                      const wchar_t **queuedPaths, int queuedPathCount) {
     DWORD attrs = GetFileAttributesW(path);
     if (attrs == INVALID_FILE_ATTRIBUTES) return;
     if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
@@ -455,13 +481,14 @@ static void scan_path(const wchar_t *path, Track **batch, int *count, int *capac
             if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
             child = join_path(path, fd.cFileName);
             if (child == NULL) continue;
-            scan_path(child, batch, count, capacity, depth + 1);
+            scan_path(child, batch, count, capacity, depth + 1, queuedPaths, queuedPathCount);
             free(child);
         } while (FindNextFileW(h, &fd));
         FindClose(h);
         return;
     }
     if (!has_audio_extension(path) || *count >= MAX_TRACKS) return;
+    if (!g_allowDuplicates && path_is_queued(path, queuedPaths, queuedPathCount)) return;
     if (!grow_tracks(batch, capacity, *count + 1)) return;
     make_track(path, &(*batch)[*count]);
     if ((*batch)[*count].path != NULL) (*count)++;
@@ -745,14 +772,57 @@ static void open_track_location(int index) {
 
 static void add_paths(const wchar_t **paths, int pathCount, BOOL playFirst) {
     Track *batch = NULL;
+    const wchar_t **queuedPaths = NULL;
     int count = 0, capacity = 0;
-    int i, firstNew = g_trackCount;
+    int queuedPathCount = g_allowDuplicates ? 0 : g_trackCount;
+    int i, firstNew = g_trackCount, duplicatePlayingTrack = -1;
+    if (queuedPathCount > 0) {
+        queuedPaths = (const wchar_t **)malloc((size_t)queuedPathCount * sizeof(wchar_t *));
+        if (queuedPaths != NULL) {
+            for (i = 0; i < queuedPathCount; i++) queuedPaths[i] = g_tracks[i].path;
+            qsort(queuedPaths, (size_t)queuedPathCount, sizeof(wchar_t *), path_pointer_cmp);
+        }
+    }
+    if (playFirst && !g_allowDuplicates) {
+        int i, j;
+        for (i = 0; i < pathCount && duplicatePlayingTrack < 0; i++) {
+            if (paths[i] == NULL || !has_audio_extension(paths[i])) continue;
+            for (j = 0; j < g_trackCount; j++) {
+                if (_wcsicmp(paths[i], g_tracks[j].path) == 0) {
+                    duplicatePlayingTrack = j;
+                    break;
+                }
+            }
+        }
+    }
     for (i = 0; i < pathCount; i++) {
         if (paths[i] == NULL || paths[i][0] == 0) continue;
-        scan_path(paths[i], &batch, &count, &capacity, 0);
+        scan_path(paths[i], &batch, &count, &capacity, 0, queuedPaths, queuedPathCount);
     }
-    if (count == 0) { free(batch); return; }
+    free(queuedPaths);
+    if (count == 0) {
+        free(batch);
+        if (playFirst && duplicatePlayingTrack >= 0) play_track(duplicatePlayingTrack, TRUE);
+        return;
+    }
     qsort(batch, (size_t)count, sizeof(Track), track_cmp);
+    if (!g_allowDuplicates) {
+        int kept = 0;
+        for (i = 0; i < count; i++) {
+            if (kept > 0 && _wcsicmp(batch[kept - 1].path, batch[i].path) == 0) {
+                free_track(&batch[i]);
+                continue;
+            }
+            if (kept != i) batch[kept] = batch[i];
+            kept++;
+        }
+        count = kept;
+    }
+    if (count == 0) {
+        free(batch);
+        if (playFirst && duplicatePlayingTrack >= 0) play_track(duplicatePlayingTrack, TRUE);
+        return;
+    }
     if (grow_tracks(&g_tracks, &g_trackCapacity, g_trackCount + count)) {
         for (i = 0; i < count; i++) g_tracks[g_trackCount++] = batch[i];
     } else {
@@ -1288,6 +1358,9 @@ static void show_scale_menu(HWND hwnd, LPARAM lp) {
     if (!AppendMenuW(menu, MF_POPUP, (UINT_PTR)scaleMenu, L"Scale")) {
         DestroyMenu(scaleMenu); DestroyMenu(menu); return;
     }
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING | (g_allowDuplicates ? MF_CHECKED : MF_UNCHECKED),
+                IDM_ALLOW_DUPLICATES, L"Allow duplicates");
     if (x == -1 && y == -1) {
         RECT window; GetWindowRect(hwnd, &window);
         x = window.left + 24; y = window.top + 48;
@@ -1301,6 +1374,7 @@ static void show_scale_menu(HWND hwnd, LPARAM lp) {
         case IDM_SCALE_125: apply_ui_scale(125); break;
         case IDM_SCALE_150: apply_ui_scale(150); break;
         case IDM_SCALE_200: apply_ui_scale(200); break;
+        case IDM_ALLOW_DUPLICATES: g_allowDuplicates = !g_allowDuplicates; break;
         default: break;
     }
 }
