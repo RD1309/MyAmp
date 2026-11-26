@@ -24,11 +24,11 @@
 #include "../vendor/miniaudio.h"
 
 #define APP_NAME L"MyAmp"
-#define APP_VERSION L"1.0.12"
+#define APP_VERSION L"1.0.13"
 #define APP_TITLE L"MyAmp " APP_VERSION
 #define APP_ICON_ID 101
 #define MYAMP_COPYDATA_TAG 0x4D59414Du
-#define MYAMP_INSTANCE_MUTEX L"Local\\MyAmp_1_0_12_Instance"
+#define MYAMP_INSTANCE_MUTEX L"Local\\MyAmp_1_0_13_Instance"
 #define MAX_TRACKS 100000
 #define PLAYER_TIMER 1
 #define PLAYER_TIMER_MS 200
@@ -36,6 +36,7 @@
 #define PLAYLIST_ROW_HEIGHT 30
 
 enum { IDM_SCALE_50 = 4101, IDM_SCALE_75, IDM_SCALE_100, IDM_SCALE_125, IDM_SCALE_150, IDM_SCALE_200, IDM_ALLOW_DUPLICATES };
+enum { IDM_OUTPUT_DEFAULT = 4299, IDM_OUTPUT_DEVICE_BASE = 4300, MAX_OUTPUT_MENU_DEVICES = 64 };
 enum { IDM_PLAYLIST_REMOVE = 4201, IDM_PLAYLIST_LOCATION };
 
 typedef struct Track {
@@ -75,8 +76,15 @@ static HWND g_playlistTip;
 static HFONT g_playlistFont;
 static HFONT g_playerFont;
 static ma_engine g_engine;
+static ma_context g_audioContext;
 static ma_sound g_sound;
 static BOOL g_engineReady;
+static BOOL g_audioContextReady;
+static BOOL g_outputIsDefault = TRUE;
+static ma_device_id g_outputDeviceId;
+static ma_device_id g_menuOutputIds[MAX_OUTPUT_MENU_DEVICES];
+static int g_menuOutputCount;
+static DWORD g_lastOutputCheck;
 static BOOL g_soundReady;
 static BOOL g_comReady;
 static BOOL g_paused;
@@ -1335,11 +1343,104 @@ static void apply_ui_scale(int percent) {
     if (g_playlistView) InvalidateRect(g_playlistView, NULL, FALSE);
 }
 
+static ma_result init_audio_engine(BOOL useDefault, const ma_device_id *deviceId) {
+    ma_engine_config config = ma_engine_config_init();
+    config.pContext = &g_audioContext;
+    config.pPlaybackDeviceID = useDefault ? NULL : (ma_device_id *)deviceId;
+    return ma_engine_init(&config, &g_engine);
+}
+
+static BOOL enumerate_output_devices(ma_device_info **devices, ma_uint32 *count) {
+    ma_device_info *captureDevices = NULL;
+    ma_uint32 captureCount = 0;
+    if (!g_audioContextReady) return FALSE;
+    return ma_context_get_devices(&g_audioContext, devices, count,
+                                  &captureDevices, &captureCount) == MA_SUCCESS;
+}
+
+static BOOL selected_output_is_available(void) {
+    ma_device_info *devices = NULL;
+    ma_uint32 count = 0, i;
+    if (g_outputIsDefault) return TRUE;
+    if (!enumerate_output_devices(&devices, &count)) return TRUE;
+    for (i = 0; i < count; i++) {
+        if (ma_device_id_equal(&devices[i].id, &g_outputDeviceId)) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL switch_audio_output(BOOL useDefault, const ma_device_id *deviceId, BOOL forcePause) {
+    ma_uint64 positionFrames = 0;
+    ma_uint32 sampleRate = 0, channels = 0;
+    ma_format format;
+    BOOL hadSound = g_soundReady, wasPaused = g_paused;
+    ma_result result;
+
+    if (hadSound) {
+        ma_sound_get_data_format(&g_sound, &format, &channels, &sampleRate, NULL, 0);
+        ma_sound_get_cursor_in_pcm_frames(&g_sound, &positionFrames);
+        ma_sound_uninit(&g_sound);
+        g_soundReady = FALSE;
+    }
+    if (g_engineReady) {
+        ma_engine_uninit(&g_engine);
+        g_engineReady = FALSE;
+    }
+
+    g_outputIsDefault = useDefault;
+    if (useDefault) memset(&g_outputDeviceId, 0, sizeof(g_outputDeviceId));
+    else g_outputDeviceId = *deviceId;
+    result = init_audio_engine(g_outputIsDefault, &g_outputDeviceId);
+    if (result != MA_SUCCESS && !g_outputIsDefault) {
+        g_outputIsDefault = TRUE;
+        memset(&g_outputDeviceId, 0, sizeof(g_outputDeviceId));
+        result = init_audio_engine(TRUE, NULL);
+        forcePause = TRUE;
+    }
+    if (result != MA_SUCCESS) {
+        g_paused = TRUE;
+        update_player();
+        return FALSE;
+    }
+
+    g_engineReady = TRUE;
+    ma_engine_set_volume(&g_engine, g_muted ? 0.0f : g_volume);
+    if (hadSound && g_current >= 0 && g_current < g_trackCount) {
+        result = ma_sound_init_from_file_w(&g_engine, g_tracks[g_current].path,
+                MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION,
+                NULL, NULL, &g_sound);
+        if (result == MA_SUCCESS) {
+            g_soundReady = TRUE;
+            ma_sound_set_looping(&g_sound, g_repeatMode == REPEAT_SONG);
+            ma_sound_set_volume(&g_sound, 1.0f);
+            if (sampleRate != 0) ma_sound_seek_to_pcm_frame(&g_sound, positionFrames);
+            g_paused = wasPaused || forcePause;
+            if (!g_paused) ma_sound_start(&g_sound);
+        } else {
+            g_paused = TRUE;
+        }
+    } else {
+        g_paused = wasPaused || forcePause;
+    }
+    update_player();
+    return TRUE;
+}
+
+static void check_selected_output(void) {
+    DWORD now = GetTickCount();
+    if (g_outputIsDefault || (DWORD)(now - g_lastOutputCheck) < 1500) return;
+    g_lastOutputCheck = now;
+    if (!selected_output_is_available())
+        switch_audio_output(TRUE, NULL, TRUE);
+}
+
 static void show_scale_menu(HWND hwnd, LPARAM lp) {
-    HMENU menu = CreatePopupMenu(), scaleMenu = CreatePopupMenu();
+    HMENU menu = CreatePopupMenu(), scaleMenu = CreatePopupMenu(), outputMenu = CreatePopupMenu();
+    ma_device_info *outputDevices = NULL;
+    ma_uint32 outputCount = 0, i;
     int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp), command = 0;
     int selected = IDM_SCALE_100;
-    if (!menu || !scaleMenu) { if (menu) DestroyMenu(menu); if (scaleMenu) DestroyMenu(scaleMenu); return; }
+    if (!menu || !scaleMenu || !outputMenu) { if (menu) DestroyMenu(menu); if (scaleMenu) DestroyMenu(scaleMenu); if (outputMenu) DestroyMenu(outputMenu); return; }
     AppendMenuW(scaleMenu, MF_STRING, IDM_SCALE_50, L"50%");
     AppendMenuW(scaleMenu, MF_STRING, IDM_SCALE_75, L"75%");
     AppendMenuW(scaleMenu, MF_STRING, IDM_SCALE_100, L"100%");
@@ -1356,8 +1457,27 @@ static void show_scale_menu(HWND hwnd, LPARAM lp) {
     }
     CheckMenuRadioItem(scaleMenu, IDM_SCALE_50, IDM_SCALE_200, selected, MF_BYCOMMAND);
     if (!AppendMenuW(menu, MF_POPUP, (UINT_PTR)scaleMenu, L"Scale")) {
-        DestroyMenu(scaleMenu); DestroyMenu(menu); return;
+        DestroyMenu(scaleMenu); DestroyMenu(outputMenu); DestroyMenu(menu); return;
     }
+    AppendMenuW(outputMenu, MF_STRING | (g_outputIsDefault ? MF_CHECKED : MF_UNCHECKED),
+                IDM_OUTPUT_DEFAULT, L"Windows default");
+    g_menuOutputCount = 0;
+    if (enumerate_output_devices(&outputDevices, &outputCount)) {
+        for (i = 0; i < outputCount && g_menuOutputCount < MAX_OUTPUT_MENU_DEVICES; i++) {
+            wchar_t deviceName[MA_MAX_DEVICE_NAME_LENGTH + 1];
+            UINT commandId = IDM_OUTPUT_DEVICE_BASE + (UINT)g_menuOutputCount;
+            if (!MultiByteToWideChar(CP_UTF8, 0, outputDevices[i].name, -1,
+                                     deviceName, (int)(sizeof(deviceName) / sizeof(deviceName[0]))))
+                lstrcpynW(deviceName, L"Audio output", (int)(sizeof(deviceName) / sizeof(deviceName[0])));
+            g_menuOutputIds[g_menuOutputCount] = outputDevices[i].id;
+            AppendMenuW(outputMenu, MF_STRING |
+                        ((!g_outputIsDefault && ma_device_id_equal(&g_outputDeviceId, &outputDevices[i].id)) ? MF_CHECKED : MF_UNCHECKED),
+                        commandId, deviceName);
+            g_menuOutputCount++;
+        }
+    }
+    if (g_menuOutputCount == 0) AppendMenuW(outputMenu, MF_GRAYED | MF_STRING, 0, L"No output devices found");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)outputMenu, L"Audio output");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING | (g_allowDuplicates ? MF_CHECKED : MF_UNCHECKED),
                 IDM_ALLOW_DUPLICATES, L"Allow duplicates");
@@ -1375,7 +1495,18 @@ static void show_scale_menu(HWND hwnd, LPARAM lp) {
         case IDM_SCALE_150: apply_ui_scale(150); break;
         case IDM_SCALE_200: apply_ui_scale(200); break;
         case IDM_ALLOW_DUPLICATES: g_allowDuplicates = !g_allowDuplicates; break;
-        default: break;
+        case IDM_OUTPUT_DEFAULT:
+            if (!g_outputIsDefault && !switch_audio_output(TRUE, NULL, FALSE))
+                MessageBoxW(hwnd, L"Could not switch to the Windows default audio output.", APP_NAME, MB_ICONERROR | MB_OK);
+            break;
+        default:
+            if (command >= IDM_OUTPUT_DEVICE_BASE && command < IDM_OUTPUT_DEVICE_BASE + g_menuOutputCount) {
+                int deviceIndex = command - IDM_OUTPUT_DEVICE_BASE;
+                if ((g_outputIsDefault || !ma_device_id_equal(&g_outputDeviceId, &g_menuOutputIds[deviceIndex])) &&
+                    !switch_audio_output(FALSE, &g_menuOutputIds[deviceIndex], FALSE))
+                    MessageBoxW(hwnd, L"Could not open the selected audio output.", APP_NAME, MB_ICONERROR | MB_OK);
+            }
+            break;
     }
 }
 
@@ -1470,6 +1601,7 @@ static LRESULT CALLBACK player_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return TRUE;
         }
         case WM_TIMER:
+            check_selected_output();
             if (g_soundReady && !g_paused && g_repeatMode != REPEAT_SONG && ma_sound_at_end(&g_sound)) advance_next();
             if (g_soundReady && !g_paused) {
                 invalidate_player_rect(g_seekRect);
@@ -1525,6 +1657,7 @@ static LRESULT CALLBACK player_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CLOSE:
             stop_sound();
             if (g_engineReady) { ma_engine_uninit(&g_engine); g_engineReady = FALSE; }
+            if (g_audioContextReady) { ma_context_uninit(&g_audioContext); g_audioContextReady = FALSE; }
             if (IsWindow(g_playlistWindow)) DestroyWindow(g_playlistWindow);
             if (IsWindow(g_playlistOwner)) DestroyWindow(g_playlistOwner);
             DestroyWindow(hwnd);
@@ -2007,9 +2140,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, PWSTR cmd, int show) {
         if (g_comReady) CoUninitialize();
         return 1;
     }
-    r = ma_engine_init(NULL, &g_engine);
+    r = ma_context_init(NULL, 0, NULL, &g_audioContext);
+    if (r == MA_SUCCESS) g_audioContextReady = TRUE;
+    if (r == MA_SUCCESS) r = init_audio_engine(TRUE, NULL);
     if (r != MA_SUCCESS) {
         MessageBoxW(NULL, L"Could not initialize audio output.", APP_NAME, MB_ICONERROR | MB_OK);
+        if (g_audioContextReady) { ma_context_uninit(&g_audioContext); g_audioContextReady = FALSE; }
         if (argv) LocalFree(argv);
         CloseHandle(g_instanceMutex); g_instanceMutex = NULL;
         if (g_comReady) CoUninitialize();
@@ -2033,6 +2169,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, PWSTR cmd, int show) {
         if (IsWindow(g_playlistOwner)) DestroyWindow(g_playlistOwner);
         if (IsWindow(g_playerWindow)) DestroyWindow(g_playerWindow);
         if (g_engineReady) ma_engine_uninit(&g_engine);
+        if (g_audioContextReady) ma_context_uninit(&g_audioContext);
         if (argv) LocalFree(argv);
         CloseHandle(g_instanceMutex); g_instanceMutex = NULL;
         if (g_comReady) CoUninitialize();
@@ -2053,6 +2190,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, PWSTR cmd, int show) {
     if (g_instanceMutex) { CloseHandle(g_instanceMutex); g_instanceMutex = NULL; }
     if (g_comReady) CoUninitialize();
     if (g_engineReady) ma_engine_uninit(&g_engine);
+    if (g_audioContextReady) ma_context_uninit(&g_audioContext);
     for (int i = 0; i < g_trackCount; i++) free_track(&g_tracks[i]);
     free(g_tracks); free(g_history);
     return (int)msg.wParam;
